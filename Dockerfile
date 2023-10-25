@@ -1,98 +1,65 @@
+# syntax=docker/dockerfile:1.4.2
+
 FROM nvidia/cuda:11.1.1-cudnn8-runtime-ubuntu20.04
 
-SHELL ["/bin/bash", "-c"]
+##### Install requirements
+RUN apt update && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC \
+                   apt install -y --allow-unauthenticated \
+                                  wget git vim build-essential \
+                                  libosmesa6-dev libglew-dev \
+                                  glibc-source unzip \
+                                  mpich python3-dev python3-pip patchelf \
+                                  libgl1-mesa-dev libgl1-mesa-glx \
+                                  ffmpeg net-tools parallel software-properties-common \
+                                  swig zlib1g-dev \
+                && apt-get clean \
+                && rm -rf /var/lib/apt/lists/*
 
-##########################################################
-### System dependencies
-##########################################################
+RUN python3 -m pip install pip --upgrade pip
 
-RUN apt-get update -q \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    cmake \
-    curl \
-    git \
-    libgl1-mesa-dev \
-    libgl1-mesa-glx \
-    libglew-dev \
-    libosmesa6-dev \
-    ffmpeg \
-    net-tools \
-    parallel \
-    software-properties-common \
-    swig \
-    unzip \
-    vim \
-    wget \
-    xpra \
-    xserver-xorg-dev \
-    zlib1g-dev \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+#### set directory variables, working directory, and add the D4RL package
+ENV HOME=/diffuser
+WORKDIR $HOME
+ADD D4RL $HOME/D4RL
+ADD mujoco-py $HOME/mujoco-py
+ADD mjkey.txt $HOME/mjkey.txt
 
-ENV LANG C.UTF-8
+#### single script creating the docker image  
+RUN pip3 install -U Cython==3.0.0a10
 
-COPY ./azure/files/Xdummy /usr/local/bin/Xdummy
-RUN chmod +x /usr/local/bin/Xdummy
+RUN wget -c https://www.roboti.us/download/mujoco200_linux.zip -O mujoco200.zip
+RUN unzip mujoco200.zip -d $HOME/.mujoco/
+RUN rm mujoco200.zip
+RUN mv $HOME/.mujoco/mujoco200_linux $HOME/.mujoco/mujoco200
+RUN mv $HOME/mjkey.txt $HOME/.mujoco/mjkey.txt
+ENV LD_LIBRARY_PATH=/diffuser/.mujoco/mujoco200/bin:${LD_LIBRARY_PATH}
 
-# Workaround for https://bugs.launchpad.net/ubuntu/+source/nvidia-graphics-drivers-375/+bug/1674677
-COPY ./azure/files/10_nvidia.json /usr/share/glvnd/egl_vendor.d/10_nvidia.json
-COPY ./environment.yml /opt/environment.yml
+WORKDIR $HOME/mujoco-py
+RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.dev.txt
+RUN python3 setup.py build 
+RUN python3 setup.py install
 
-ENV LD_LIBRARY_PATH /usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
+WORKDIR $HOME/D4RL
+RUN pip3 install -e .
 
-##########################################################
-### gsutil
-##########################################################
-RUN curl -sSL https://sdk.cloud.google.com | bash
+WORKDIR $HOME
+RUN pip3 install gym
+#pip3 install mujoco_py==2.0.2.8
+ADD requirements.txt $HOME/requirements.txt
+RUN python3 -m pip install -r requirements.txt
 
-ENV PATH $PATH:/root/google-cloud-sdk/bin
+### end of script
+ENV MUJOCO_PY_MUJOCO_PATH=/diffuser/.mujoco/mujoco200
 
-##########################################################
-### MuJoCo
-##########################################################
-# Note: ~ is an alias for /root
-RUN mkdir -p /root/.mujoco \
-    && wget https://www.roboti.us/download/mujoco200_linux.zip -O mujoco.zip \
-    && unzip mujoco.zip -d /root/.mujoco \
-    && rm mujoco.zip
-RUN mkdir -p /root/.mujoco \
-    && wget https://www.roboti.us/download/mjpro150_linux.zip -O mujoco.zip \
-    && unzip mujoco.zip -d /root/.mujoco \
-    && rm mujoco.zip
-RUN ln -s /root/.mujoco/mujoco200_linux /root/.mujoco/mujoco200
-ENV LD_LIBRARY_PATH /root/.mujoco/mjpro150/bin:${LD_LIBRARY_PATH}
-ENV LD_LIBRARY_PATH /root/.mujoco/mujoco200/bin:${LD_LIBRARY_PATH}
-ENV LD_LIBRARY_PATH /root/.mujoco/mujoco200_linux/bin:${LD_LIBRARY_PATH}
-COPY ./azure/files/mjkey.txt /root/.mujoco
+# extra command to build mujoco-py
+ENV D4RL_SUPPRESS_IMPORT_ERROR=1
+RUN python3 -c "import mujoco_py"
+RUN python3 -c "import d4rl"
+RUN echo 'set editing-mode vi' >> $HOME/.inputrc
+RUN echo 'set keymap vi' >> $HOME/.inputrc
 
-##########################################################
-### Example Python Installation
-##########################################################
-ENV PATH /opt/conda/bin:$PATH
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
-    /bin/bash /tmp/miniconda.sh -b -p /opt/conda && \
-    rm /tmp/miniconda.sh && \
-    ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
-    echo ". /opt/conda/etc/profile.d/conda.sh" >> /etc/bash.bashrc
+RUN echo "LD LIBRARY PATH: $LD_LIBRARY_PATH"
+RUN echo "Python version: $(python --version)"
 
-RUN conda update -y --name base conda && conda clean --all -y
-
-RUN git config --global url."https://".insteadOf git://
-RUN conda env create -f /opt/environment.yml
-ENV PATH /opt/conda/envs/diffuser/bin:$PATH
-
-##########################################################
-### gym sometimes has this patchelf issue
-##########################################################
-RUN curl -o /usr/local/bin/patchelf https://s3-us-west-2.amazonaws.com/openai-sci-artifacts/manual-builds/patchelf_0.9_amd64.elf \
-    && chmod +x /usr/local/bin/patchelf
-
-RUN echo "source activate /opt/conda/envs/diffuser && export PYTHONPATH=$PYTHONPATH:/home/code && export CUDA_VISIBLE_DEVICES=0" >> ~/.bashrc
-RUN source ~/.bashrc
-
-##########################################################
-### mount for repo
-##########################################################
-
-RUN mkdir /home/code
-RUN mkdir /home/logs
+WORKDIR /diffuser/diffuser
